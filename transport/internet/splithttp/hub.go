@@ -61,12 +61,13 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 	}
 
 	if request.Method == "POST" {
-		uploadQueue, ok := h.sessions.Load(sessionId)
+		upq, ok := h.sessions.Load(sessionId)
 		if !ok {
 			newError("sessionid does not exist").WriteToLog()
 			writer.WriteHeader(http.StatusBadRequest)
 			return
 		}
+		uploadQueue := upq.(*UploadQueue)
 
 		seq := queryString.Get("seq")
 		if seq == "" {
@@ -89,10 +90,14 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			return
 		}
 
-		err = uploadQueue.(*UploadQueue).Push(Packet{
-			Payload: payload,
-			Seq:     seqInt,
-		})
+		err = uploadQueue.Wait(seqInt)
+		if err != nil {
+			newError("failed to upload").Base(err).WriteToLog()
+			writer.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		err = uploadQueue.Push(seqInt, payload)
 
 		if err != nil {
 			newError("failed to upload").Base(err).WriteToLog()
@@ -107,7 +112,7 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			panic("expected http.ResponseWriter to be an http.Flusher")
 		}
 
-		uploadQueue := NewUploadQueue(int(2 * h.ln.config.GetNormalizedMaxConcurrentUploads()))
+		uploadQueue := NewUploadQueue(int(h.ln.config.GetNormalizedMaxConcurrentUploads()))
 
 		h.sessions.Store(sessionId, uploadQueue)
 		// the connection is finished, clean up map
