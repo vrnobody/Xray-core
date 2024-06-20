@@ -4,8 +4,8 @@ package splithttp
 // packets by a sequence number
 
 import (
-	"container/heap"
 	"io"
+	"sync"
 )
 
 type Packet struct {
@@ -14,107 +14,94 @@ type Packet struct {
 }
 
 type UploadQueue struct {
-	pushedPackets chan Packet
-	heap          uploadHeap
+	sync.RWMutex
+
+	pushedPackets chan *Packet
+	tickets       chan struct{}
+	buff          []byte
 	nextSeq       uint64
 	closed        bool
-	maxPackets    int
+	maxPackets    uint64
 }
 
 func NewUploadQueue(maxPackets int) *UploadQueue {
+	tickets := make(chan struct{}, maxPackets)
+	for i := 0; i < maxPackets; i++ {
+		tickets <- struct{}{}
+	}
 	return &UploadQueue{
-		pushedPackets: make(chan Packet, maxPackets),
-		heap:          uploadHeap{},
+		pushedPackets: make(chan *Packet, maxPackets+1),
+		tickets:       tickets,
+		buff:          nil,
 		nextSeq:       0,
 		closed:        false,
-		maxPackets:    maxPackets,
+		maxPackets:    uint64(maxPackets),
 	}
 }
 
-func (h *UploadQueue) Push(p Packet) error {
+func (h *UploadQueue) Push(p *Packet) error {
+	h.RWMutex.RLock()
+	defer h.RWMutex.RUnlock()
 	if h.closed {
 		return newError("splithttp packet queue closed")
 	}
-
 	h.pushedPackets <- p
 	return nil
 }
 
+func (h *UploadQueue) Wait() error {
+	if _, more := <-h.tickets; !more {
+		return newError("splithttp packet queue closed")
+	}
+	return nil
+}
+
+func (h *UploadQueue) signal() {
+	h.RWMutex.RLock()
+	defer h.RWMutex.RUnlock()
+	if h.closed {
+		return
+	}
+	h.tickets <- struct{}{}
+}
+
 func (h *UploadQueue) Close() error {
+	h.RWMutex.Lock()
 	h.closed = true
+	h.RWMutex.Unlock()
+	close(h.tickets)
 	close(h.pushedPackets)
 	return nil
 }
 
 func (h *UploadQueue) Read(b []byte) (int, error) {
-	if h.closed && len(h.heap) == 0 && len(h.pushedPackets) == 0 {
+	if h.closed && len(h.buff) < 1 && len(h.pushedPackets) < 1 {
 		return 0, io.EOF
 	}
 
-	needMorePackets := false
-
-	if len(h.heap) > 0 {
-		packet := heap.Pop(&h.heap).(Packet)
-		n := 0
-
-		if packet.Seq == h.nextSeq {
-			copy(b, packet.Payload)
-			n = min(len(b), len(packet.Payload))
-
-			if n < len(packet.Payload) {
-				// partial read
-				packet.Payload = packet.Payload[n:]
-				heap.Push(&h.heap, packet)
+	for {
+		// try to read from buffer
+		l := len(h.buff)
+		if l > 0 {
+			n := copy(b, h.buff)
+			if n < l {
+				h.buff = h.buff[n:]
 			} else {
-				h.nextSeq = packet.Seq + 1
+				h.buff = nil
 			}
-
 			return n, nil
 		}
 
-		// misordered packet
-		if packet.Seq > h.nextSeq {
-			if len(h.heap) > h.maxPackets {
-				// the "reassembly buffer" is too large, and we want to
-				// constrain memory usage somehow. let's tear down the
-				// connection, and hope the application retries.
-				return 0, newError("packet queue is too large")
-			}
-			heap.Push(&h.heap, packet)
-			needMorePackets = true
-		}
-	} else {
-		needMorePackets = true
-	}
-
-	if needMorePackets {
-		packet, more := <-h.pushedPackets
+		// read chan to buffer
+		p, more := <-h.pushedPackets
 		if !more {
 			return 0, io.EOF
 		}
-		heap.Push(&h.heap, packet)
+		if p.Seq != h.nextSeq {
+			return 0, newError("packet lost")
+		}
+		h.buff = p.Payload
+		h.nextSeq++
+		h.signal()
 	}
-
-	return 0, nil
-}
-
-// heap code directly taken from https://pkg.go.dev/container/heap
-type uploadHeap []Packet
-
-func (h uploadHeap) Len() int           { return len(h) }
-func (h uploadHeap) Less(i, j int) bool { return h[i].Seq < h[j].Seq }
-func (h uploadHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
-
-func (h *uploadHeap) Push(x any) {
-	// Push and Pop use pointer receivers because they modify the slice's length,
-	// not just its contents.
-	*h = append(*h, x.(Packet))
-}
-
-func (h *uploadHeap) Pop() any {
-	old := *h
-	n := len(old)
-	x := old[n-1]
-	*h = old[0 : n-1]
-	return x
 }
