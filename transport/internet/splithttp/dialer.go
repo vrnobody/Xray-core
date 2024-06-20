@@ -16,7 +16,6 @@ import (
 	"github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/session"
-	"github.com/xtls/xray-core/common/signal/semaphore"
 	"github.com/xtls/xray-core/common/uuid"
 	"github.com/xtls/xray-core/transport/internet"
 	"github.com/xtls/xray-core/transport/internet/stat"
@@ -153,7 +152,6 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 	transportConfiguration := streamSettings.ProtocolSettings.(*Config)
 	tlsConfig := tls.ConfigFromStreamSettings(streamSettings)
 
-	maxConcurrentUploads := transportConfiguration.GetNormalizedMaxConcurrentUploads()
 	maxUploadSize := transportConfiguration.GetNormalizedMaxUploadSize()
 
 	if tlsConfig != nil {
@@ -218,7 +216,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 	uploadPipeReader, uploadPipeWriter := pipe.New(pipe.WithSizeLimit(maxUploadSize))
 
 	go func() {
-		requestsLimiter := semaphore.New(int(maxConcurrentUploads))
+
 		var requestCounter int64
 
 		// by offloading the uploads into a buffered pipe, multiple conn.Write
@@ -230,13 +228,11 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 				break
 			}
 
-			<-requestsLimiter.Wait()
-
 			url := uploadUrl + strconv.FormatInt(requestCounter, 10)
 			requestCounter += 1
 
-			go func() {
-				defer requestsLimiter.Signal()
+			// for git diff
+			{
 				req, err := http.NewRequest("POST", url, &buf.MultiBufferContainer{MultiBuffer: chunk})
 				if err != nil {
 					newError("failed to send upload").Base(err).WriteToLog()
@@ -288,9 +284,9 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 
 					httpClient.uploadRawPool.Put(uploadConn)
 				}
-			}()
-
+			}
 		}
+
 	}()
 
 	// skip "ok" response
