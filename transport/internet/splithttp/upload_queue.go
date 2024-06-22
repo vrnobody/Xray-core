@@ -49,10 +49,6 @@ func (h *UploadQueue) Push(seq uint64, payload []byte) error {
 	// notify reader
 	defer h.sendReadSignal()
 
-	if h.closed {
-		return newError("splithttp packet queue closed")
-	}
-
 	// save packet to buffer
 	h.buffers.Store(seq, payload)
 	return nil
@@ -60,10 +56,21 @@ func (h *UploadQueue) Push(seq uint64, payload []byte) error {
 
 // Wait until buffer is available
 func (h *UploadQueue) Wait(seq uint64) error {
+	// fast path
+	if h.closed {
+		return newError("splithttp packet queue closed")
+	}
+
+	if seq < h.seq+h.bufferSize {
+		return nil
+	}
+
+	// slow path
 	h.writeMu.Lock()
 	defer h.writeMu.Unlock()
 
 	signal := true
+	// h.seq can change
 	for signal && !h.closed && seq >= h.seq+h.bufferSize {
 		signal = h.writeSignal.WaitWithTimeout(h.writeTimeout)
 	}
@@ -86,6 +93,7 @@ func (h *UploadQueue) Close() error {
 }
 
 func (h *UploadQueue) sendReadSignal() {
+	// non-blocking (kind of)
 	if len(h.readSignal) < h.readSignalSize {
 		h.readSignal <- struct{}{}
 	}
