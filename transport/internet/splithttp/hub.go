@@ -40,6 +40,9 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		return
 	}
 
+	newError("handling: ", request.URL.String()).AtError().WriteToLog()
+	defer newError("handled: ", request.URL.String()).AtError().WriteToLog()
+
 	queryString := request.URL.Query()
 	sessionId := queryString.Get("session")
 	if sessionId == "" {
@@ -75,12 +78,14 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			return
 		}
 
+		newError("reading body: ", request.URL.String()).AtError().WriteToLog()
 		payload, err := io.ReadAll(request.Body)
 		if err != nil {
 			newError("failed to upload").Base(err).WriteToLog()
 			writer.WriteHeader(http.StatusInternalServerError)
 			return
 		}
+		newError("readed body: ", request.URL.String(), " len: ", len(payload)/1024, "k").AtError().WriteToLog()
 
 		seqInt, err := strconv.ParseUint(seq, 10, 64)
 		if err != nil {
@@ -89,10 +94,13 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			return
 		}
 
+		newError("push: ", request.URL.String()).AtError().WriteToLog()
 		err = uploadQueue.(*UploadQueue).Push(Packet{
 			Payload: payload,
 			Seq:     seqInt,
+			Session: sessionId,
 		})
+		newError("pushed: ", request.URL.String()).AtError().WriteToLog()
 
 		if err != nil {
 			newError("failed to upload").Base(err).WriteToLog()

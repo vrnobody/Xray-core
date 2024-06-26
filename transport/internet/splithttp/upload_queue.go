@@ -11,6 +11,7 @@ import (
 type Packet struct {
 	Payload []byte
 	Seq     uint64
+	Session string
 }
 
 type UploadQueue struct {
@@ -35,7 +36,6 @@ func (h *UploadQueue) Push(p Packet) error {
 	if h.closed {
 		return newError("splithttp packet queue closed")
 	}
-
 	h.pushedPackets <- p
 	return nil
 }
@@ -58,6 +58,7 @@ func (h *UploadQueue) Read(b []byte) (int, error) {
 		n := 0
 
 		if packet.Seq == h.nextSeq {
+
 			copy(b, packet.Payload)
 			n = min(len(b), len(packet.Payload))
 
@@ -69,6 +70,7 @@ func (h *UploadQueue) Read(b []byte) (int, error) {
 				h.nextSeq = packet.Seq + 1
 			}
 
+			// newError("read packet: ", packet.Session, " with seq: ", packet.Seq, " readed: ", n/1024, "k ", "remain: ", len(packet.Payload)/1024, "k").AtError().WriteToLog()
 			return n, nil
 		}
 
@@ -78,6 +80,8 @@ func (h *UploadQueue) Read(b []byte) (int, error) {
 				// the "reassembly buffer" is too large, and we want to
 				// constrain memory usage somehow. let's tear down the
 				// connection, and hope the application retries.
+
+				newError("dump session: ", packet.Session, " seq: ", h.nextSeq, " heap size: ", len(h.heap), " chan size: ", len(h.pushedPackets)).AtError().WriteToLog()
 				return 0, newError("packet queue is too large")
 			}
 			heap.Push(&h.heap, packet)
@@ -89,6 +93,7 @@ func (h *UploadQueue) Read(b []byte) (int, error) {
 
 	if needMorePackets {
 		packet, more := <-h.pushedPackets
+		newError("pop: ", packet.Session, " with seq: ", packet.Seq).AtError().WriteToLog()
 		if !more {
 			return 0, io.EOF
 		}
